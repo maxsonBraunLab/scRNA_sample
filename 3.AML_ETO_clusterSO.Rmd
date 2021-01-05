@@ -1,0 +1,292 @@
+---
+title: "Cluster AML-ETO SO"
+author: "TLusardi"
+date: "11/04/2020"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+params:
+  local: TRUE
+---
+
+#### Operations   
+* Cluster each object individually
+* Crudely identify clusters in the DMSO object
+* Transfer cluster identities to the ava, ory, and combo objects
+
+##### Data Import Options - File naming
+*importDate - select the creation date for the desired object
+* Filtering - build in ability to process differently filtered objects in parallel
+  + nofilt:  objects include all cells that pass min/max counts, max % mitochondria
+  + filtered:  objects filtered to have similar numbers of cells, counts/cell  
+  
+##### Regression Options (in each object)
+* regress - start from preprocessed objects
+  + noregress
+  + regress.CC - regress on cell cycle - probably not the best option as it removes any cell cycle information that may be important for differentiating cells
+  + regress.diff - regress on the difference in cell cycle values; per Seurat notations, it preserves cell cycle information relevant to development
+  
+  
+### Set up libraries and directories
+
+```{r "setup_libs", include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(networkD3)
+library(patchwork)
+library(dplyr)
+
+filts2process = c("nofilt", "filtered")[1]
+importDate <- "2020-11-03"
+runs2process = c("dmso", "ava", "ory", "combo")
+```
+
+```{r "readObjects", include=FALSE}
+directory = list(raw = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/raw",
+                 rda = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/rda")
+
+expts.ls <- list()
+for (myfilt in filts2process) {
+  expts.ls[[myfilt]] <- readRDS(sprintf("%s/aml_eto.regressSO.%s.%s.rds", directory$rda, myfilt, importDate))
+}
+```
+
+### Cluster individual experiments
+
+```{r, "iCluster", echo=FALSE, warning=FALSE, message=FALSE}
+for (myfilt in filts2process) { 
+  for (myrun in names(expts.ls[[myfilt]])) {
+    myso <- expts.ls[[myfilt]][[myrun]]
+    for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+      mypca <- gsub("SCT", "pca", myregress)
+      mygraph <- paste(myregress, "snn", sep = "_")
+    
+      myso <- FindNeighbors(myso, dims = 1:10, assay = myregress, reduction = mypca)
+      myso <- FindClusters(myso, graph.name = mygraph, resolution = 0.8)
+    }
+    expts.ls[[myfilt]][[myrun]] <- myso
+  }
+}
+```
+
+### Plot Individual Clusters
+
+```{r, "iplotCluster", echo=FALSE, warning=FALSE, message=FALSE}
+for (myfilt in filts2process) {
+  for (myrun in names(expts.ls[[myfilt]])) {
+    for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+      mypca <- gsub("SCT", "pca", myregress)
+      mypcakey <- paste(gsub("/.", "", mypca), "_", sep = "")
+      myumap <- gsub("SCT", "umap", myregress)
+      myumapkey <- paste(gsub("/.", "", myumap), "_", sep = "")
+      mygraph <- paste(myregress, "snn", sep = "_")
+      myclusters <- paste(myregress, "snn_res.0.8", sep = "_")
+      plot(DimPlot(expts.ls[[myfilt]][[myrun]], reduction = myumap, group.by = myclusters)
+           + labs(title = sprintf("%s - %s: %s regression", myfilt, myrun, myregress)))
+    }
+  }
+}
+```
+
+###Sankey Plots to illustrate clustering differences
+
+```{r, "compSankey", echo=FALSE}
+  
+for (myfilt in filts2process) {
+  for (myrun in names(expts.ls[[myfilt]])) {
+    myso <- expts.ls[[myfilt]][[myrun]]
+  
+    # Create node and link files from meta.data
+    mymeta <- data.table(myso@meta.data, keep.rownames = "CellID")
+    mymeta[, SCT_clust := paste("SCT", SCT_snn_res.0.8, sep = "_")]
+    mymeta[, SCT.CC_clust := paste("SCT.CC", SCT.CC_snn_res.0.8, sep = "_")]
+    mymeta[, SCT.Diff_clust := paste("SCT.Diff", SCT.Diff_snn_res.0.8, sep = "_")]
+    nodes <- data.table(Name = c(unique(mymeta$SCT_clust), unique(mymeta$SCT.CC_clust), unique(mymeta$SCT.Diff_clust)))
+    nodes <- nodes[order(Name)]
+    nodes[, nodeID := .I - 1]
+    links12 <- mymeta[, .N, by = .(SCT_clust, SCT.Diff_clust)][order(SCT_clust)]
+    colnames(links12) <- c("source", "target", "value")
+    links23 <- mymeta[, .N, by = .(SCT.Diff_clust, SCT.CC_clust)][order(SCT.Diff_clust)]
+    colnames(links23) <- c("source", "target", "value")
+    links <- rbindlist(list(links12, links23))
+    links <- merge(x = links, y = nodes, by.x = "source", by.y = "Name", all.x = TRUE, all.y = FALSE)
+    colnames(links)[colnames(links) == "nodeID"] <- "SourceID"
+    links <- merge(x = links, y = nodes, by.x = "target", by.y = "Name", all.x = TRUE, all.y = FALSE)
+    colnames(links)[colnames(links) == "nodeID"] <- "TargetID"
+  
+    print(sankeyNetwork(Links = links, Nodes = nodes, Source = "SourceID", Target = "TargetID",
+                        Value = "value", NodeID = "Name", fontSize = 12))
+  
+    cols2transfer <- c("SCT_clust", "SCT.CC_clust", "SCT.Diff_clust")
+    if (all.equal(mymeta$CellID, colnames(myso))) {
+      for (mycol in cols2transfer) {
+        myso[[mycol]] <- mymeta[[mycol]]
+      }
+      expts.ls[[myfilt]][[myrun]] <- myso
+    } else {
+      print(sprintf("%s: Need to order the metadata to replace in SO", myrun))
+    }
+  }
+}
+```
+
+### Identify dmso Clusters (loosely!)
+CD34/SOX4/ERG are stem cell genes one end of the dog bone  
+CD14, ITGAX, LYZ are mature monocyte genes at the other end of the dog bone
+
+Note: Will need to redo this in filtered objects
+
+```{r, "clusterID", echo=FALSE, fig.height=6, fig.width=6}
+idMarkers <- c("CD34", "SOX4", "ERG", "MYB", "CEBPD", "GATA2", "CD14", "ITGAX", "LYZ")
+idMarkers <- c("SOX4", "CEBPD", "CD14")
+for (myfilt in filts2process) {
+  for (myrun in "dmso") {
+    for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+      myumap <- gsub("SCT", "umap", myregress)
+      spliton <- paste(myregress, "snn_res.0.8", sep = "_")
+      DimPlot(expts.ls[[myfilt]][[myrun]], reduction = myumap, group.by = "orig.ident")
+      plot(DimPlot(expts.ls[[myfilt]][[myrun]], reduction = myumap, group.by = spliton, label = TRUE, label.size = 6) +
+             plot_annotation(title = sprintf("%s - %s:  Individual Object Cluster ID, %s regression", myfilt, myrun, myregress)))
+      plot(FeaturePlot(expts.ls[[myfilt]][[myrun]], features = idMarkers, reduction = myumap, slot = "scale.data", pt.size = 0.25) +
+             plot_annotation(title = sprintf("%s - %s:  Marker Genes, %s regression", myfilt, myrun, myregress)))
+    }
+  }
+}
+```
+
+### Assign DMSO cluster names
+
+```{r, "clusterName", echo=FALSE, fig.height=6, fig.width=6}
+# Cluster Labels
+dmsoLabels.ls <- list(nofilt = c(SCT_0 = "late_1", SCT_1 = "early_1_2", SCT_2 = "early_1b", SCT_3 = "early_2b",
+                                 SCT_4 = "mid_1", SCT_5 = "lone_1", SCT_6 = "mid_2", SCT_7 = "mid_3b",
+                                 SCT_8 = "lone_2", SCT_9 = "lone_mid", SCT_10 = "mid_3a",
+                                 SCT.Diff_0 = "late_1", SCT.Diff_1 = "early_1", SCT.Diff_2 = "early_2",
+                                 SCT.Diff_3 = "mid_3", SCT.Diff_4 = "mid_1", SCT.Diff_5 = "mid_2",
+                                 SCT.Diff_6 = "lone_1", SCT.Diff_7 = "lone_2", SCT.Diff_8 = "lone_mid",
+                                 SCT.CC_0 = "late_1", SCT.CC_1 = "early_1", SCT.CC_2 = "early_2",
+                                 SCT.CC_3 = "mid_2_3", SCT.CC_4 = "mid_1", SCT.CC_5 = "lone_1",
+                                 SCT.CC_6 = "lone_2", SCT.CC_7 = "mid_3b", SCT.CC_8 = "lone_mid") )
+
+dmsoLevels.ls <- list(nofilt = c("early_1", "early_2", "early_1_2", "early_1b", "early_2b",
+                                 "mid_1", "mid_2", "mid_3", "mid_2_3", "mid_3a" , "mid_3b",
+                                 "late_1", "lone_mid", "lone_1", "lone_2"))
+
+for (myfilt in filts2process) {
+  for (myrun in "dmso") {
+    dmsoLabels <- dmsoLabels.ls[[myfilt]]
+    dmsoLevels <- dmsoLevels.ls[[myfilt]]
+    myso <- expts.ls[[myfilt]][[myrun]]
+    for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+      # Add in the cluster label
+      myclust <- paste(myregress, "clust", sep = "_")
+      mylabelname <- paste(myclust, "label", sep = "_")
+      myso[[mylabelname]] <- factor(dmsoLabels[unlist(myso[[myclust]])], levels = dmsoLevels)
+    
+      # Plot with updated names
+      myumap <- gsub("SCT", "umap", myregress)
+      spliton <- paste(myregress, "snn_res.0.8", sep = "_")
+      plot(DimPlot(myso, reduction = myumap, group.by = mylabelname, label = TRUE, label.size = 6) +
+             plot_annotation(title = sprintf("%s - %s:  Individual Object Cluster Names, %s regression", myfilt, myrun, myregress)))
+#      plot(FeaturePlot(expts.ls[[myfilt]][[myrun]], features = idMarkers, reduction = myumap, slot = "scale.data", pt.size = 0.25))
+    }
+    
+    # Update expts.ls
+    expts.ls[[myfilt]][[myrun]] <- myso
+  }
+}
+```
+
+### Transfer Cluster Labels
+
+```{r, "transferLabels", echo=FALSE}
+for (myfilt in filts2process) {
+  for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+    for (myrun in c("ava", "ory", "combo")) {
+      myfeatures <- intersect(VariableFeatures(expts.ls[[myfilt]]$dmso), VariableFeatures(expts.ls[[myfilt]][[myrun]]))
+      my.anchors <- FindTransferAnchors(reference = expts.ls[[myfilt]]$dmso, query = expts.ls[[myfilt]][[myrun]], dims = 1:30, 
+                                        reference.assay = myregress, query.assay = myregress,
+                                        features = myfeatures,
+                                        normalization.method = "SCT")
+      myrefcol <- paste(myregress, "clust_label", sep = "_")
+      my.predictions <- TransferData(anchorset = my.anchors,
+                                     refdata = expts.ls[[myfilt]]$dmso@meta.data[,myrefcol],
+                                     dims = 1:30)
+      colnames(my.predictions) <- paste(myregress, colnames(my.predictions), sep = "_")
+      expts.ls[[myfilt]][[myrun]] <- AddMetaData(expts.ls[[myfilt]][[myrun]], metadata = my.predictions)
+    }
+  }
+}
+
+for (myfilt in filts2process) {
+  for (myrun in c("ava", "ory", "combo")) {
+    myso <- expts.ls[[myfilt]][[myrun]]
+    for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+      # Add in the cluster label
+      myclust <- paste(myregress, "clust", sep = "_")
+      mylabelname <- paste(myregress, "predicted.id", sep = "_")
+      
+      # Plot with updated names
+      myumap <- gsub("SCT", "umap", myregress)
+      spliton <- paste(myregress, "snn_res.0.8", sep = "_")
+      plot(DimPlot(myso, reduction = myumap, group.by = spliton, label = TRUE, label.size = 6, repel = TRUE) +
+             labs(title = sprintf("%s: %s - %s, cluster identification", myfilt, myregress, myrun)))
+      plot(DimPlot(myso, reduction = myumap, group.by = mylabelname, label = TRUE, label.size = 6, repel = TRUE) +
+             labs(title = sprintf("%s: %s - %s, labels transferred from DMSO", myfilt, myregress, myrun)))
+    }
+  }
+}
+```
+
+### Compare transferred vs. native clusters
+
+```{r, "compTxNativeClust", echo=FALSE}
+for (myfilt in filts2process) {
+  for (myrun in c("ava", "ory", "combo")) {
+    myso <- expts.ls[[myfilt]][[myrun]]
+    mymeta <- data.table(myso@meta.data, keep.rownames = "CellID")
+    for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+      # Add in the cluster label
+      myclust <- paste(myregress, "clust", sep = "_")
+      mylabelname <- paste(myregress, "predicted.id", sep = "_")
+      
+      # Node and Link for Sankey
+      nodes <- data.table(Name = c(unique(mymeta[[myclust]]), unique(mymeta[[mylabelname]])))
+      nodes <- nodes[order(Name)]
+      nodes[, nodeID := .I - 1]
+      links <- mymeta[, .N, by = mget(c(myclust, mylabelname))][order(get(mylabelname))]
+      colnames(links) <- c("source", "target", "value")
+      links <- merge(x = links, y = nodes, by.x = "source", by.y = "Name", all.x = TRUE, all.y = FALSE)
+      colnames(links)[colnames(links) == "nodeID"] <- "SourceID"
+      links <- merge(x = links, y = nodes, by.x = "target", by.y = "Name", all.x = TRUE, all.y = FALSE)
+      colnames(links)[colnames(links) == "nodeID"] <- "TargetID"
+      print(sankeyNetwork(Links = links, Nodes = nodes, Source = "SourceID", Target = "TargetID",
+                          Value = "value", NodeID = "Name", fontSize = 12))
+    }
+  }
+}
+```
+
+### Save the data
+
+```{r, echo=FALSE}
+# Save the file
+for (myfilt in names(expts.ls)) {
+  file2save <- sprintf("aml_eto.indivClustSO.%s.%s.rds", myfilt, Sys.Date())
+  print(sprintf("%s objects:  Saving scaled/normalized/regressed data in individual objects in %s", myfilt, file2save))
+  saveRDS(expts.ls[[myfilt]], file = paste(directory$rda, file2save, sep = "/"))
+}
+```
+
+```{r, echo=FALSE}
+sessionInfo()
+```
+
+

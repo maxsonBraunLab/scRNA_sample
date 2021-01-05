@@ -1,0 +1,205 @@
+---
+title: "AML-ETO SO - integrate, sct, cluster"
+author: "TLusardi"
+date: "11/05/2020"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+params:
+  local: TRUE
+---
+
+Integrate objects   
+* Use all features so can pass object to P3
+
+Assign Cell cycle scores
+* Can compare assignment to individual run assignments
+
+Run SCTransform on individual objects   
+* regress - Cell cycle
+  + noregress
+  + regress.CC - regress on cell cycle - probably not the best option as it removes any cell cycle information that may be important for differentiating cells
+  + regress.diff - regress on the difference in cell cycle values; per Seurat notations, it preserves cell cycle information relevant to development
+* regress - other features
+  + nCounts_RNA + percent.mt
+  
+Cluster & Plot!
+
+Save each object to a separate file
+
+importDate - select the creation date for the desired object
+  
+### Set up libraries and directories
+
+```{r "setup_libs", include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(networkD3)
+library(patchwork)
+library(dplyr)
+
+runs2process = c("dmso", "ava", "ory", "combo")
+importDate <- "2020-11-03"
+```
+
+```{r "setup_vars", include=FALSE}
+directory = list(raw = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/raw",
+                 rda = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/rda")
+
+expts.ls <- readRDS(sprintf("%s/aml_eto.preprocSO.nofilt.%s.rds", directory$rda, importDate))
+```
+
+### Preview Clustering
+
+```{r, echo=FALSE}
+
+```
+
+### Plot Counts Comparisons
+
+```{r, echo=FALSE}
+plotSet = list(dmso = list(col = "#e41a1c", lty = 1),
+               ava = list(col = "#377eb8", lty = 1),
+               ory = list(col = "#4daf4a", lty = 1),
+               combo = list(col = "#adaf4a", lty = 1))
+runs <- names(expts.ls)
+
+plotFeatures <- c("nCount_RNA", "nFeature_RNA")
+for (myfeature in plotFeatures) {
+  # Set up Density Plot
+  maxDens <- 0
+  maxCts <- 0
+  for (myrun in names(expts.ls)) {
+    mydens <- density(expts.ls[[myrun]]@meta.data[[myfeature]])
+    maxDens <- max(maxDens, mydens$y)
+    maxPct <- 1
+    maxCts <- max(maxCts, expts.ls[[myrun]]@meta.data[[myfeature]])
+  }
+
+  # Create a plot pane
+  plot(NULL, xlim=c(0, maxCts), ylim = c(0, maxDens), 
+       xlab = sprintf("%s", myfeature),
+       ylab = "Density", las = 1,
+       main = sprintf("Distribution of %s per Cell by Experiment", myfeature))
+  abline(h = 0, col = "grey80")
+
+  # Add a legend
+  legend(x="topright", legend = runs, lwd = 2,
+         col = unlist(plotSet)[paste(runs, "col", sep = ".")],
+         lty = as.numeric(unlist(plotSet)[paste(runs, "lty", sep = ".")]))
+
+  # Plot each density line
+  for (myrun in names(expts.ls)) {
+    lines(density(expts.ls[[myrun]]@meta.data[[myfeature]]), col = plotSet[[myrun]]$col,
+          lwd = 2)
+  }
+}
+
+temp <- merge(x = expts.ls$dmso, y = expts.ls[c("ava", "ory", "combo")])
+temp <- merge(x = expts.ls$ava, y = expts.ls[c("dmso", "ory", "combo")])
+temp <- merge(x = expts.ls$ory, y = expts.ls[c("dmso", "ava", "combo")])
+
+all.equal(expts.ls$dmso@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$dmso), grepl("dmso", colnames(temp))])
+all.equal(expts.ls$ava@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$ava), grepl("ava", colnames(temp))])
+all.equal(expts.ls$ory@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$ory), grepl("ory", colnames(temp))])
+all.equal(expts.ls$combo@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$combo), grepl("combo", colnames(temp))])
+
+plot(x = expts.ls$ory@assays$RNA@counts, y = temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$combo), grepl("combo", colnames(temp))] )
+```
+
+### Integrate the objects
+
+```{r, "integrate", echo=FALSE}
+# Needed to avoid error in getGlobalsandPackages 
+#options(future.globals.maxSize= 3530*1024^2)
+
+expts.integrated.ls <- list()
+for (myregress_feat in c("no", "yes")) {
+  for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+    my.features <- SelectIntegrationFeatures(object.list = expts.ls[[myfilt]], nfeatures = 3000, assay = rep(myregress, 4))
+    myiso <- PrepSCTIntegration(object.list = expts.ls[[myfilt]], anchor.features = my.features, verbose = FALSE, assay = rep(myregress, 4))
+    my.anchors <- FindIntegrationAnchors(object.list = myiso, normalization.method = "SCT", reference = 1, scale = FALSE,
+                                         anchor.features = my.features, verbose = TRUE)
+    integratedName <- paste("Integrated", myregress, sep = "_")
+    myintegrated <- IntegrateData(anchorset = my.anchors, normalization.method = "SCT", verbose = FALSE, new.assay.name = integratedName)
+    expts.integrated.ls[[myfilt]][[myregress]] <- myintegrated
+  }
+}
+```
+
+### Integrate
+
+
+### Normalize & Scale
+Use SCTransform with regression options noted
+
+```{r, "runSCT", warning=FALSE, echo=FALSE}
+regressions <- list(noregression = "NULL",
+                    regress.CC = c("S.Score", "G2M.Score"),
+                    regress.Diff = c("CC.Difference"))    
+
+for (myfilt in names(expts.ls)) {
+  for (myregress in names(regressions)) {
+    for (myrun in names(expts.ls[[myfilt]])) {
+      if (myregress == "noregression") {
+        myassay <- "SCT"
+        expts.ls[[myfilt]][[myrun]] <- SCTransform(expts.ls[[myfilt]][[myrun]], verbose = FALSE, new.assay.name = myassay)
+      } else {
+        myassay <- gsub("regress", "SCT", myregress)
+        expts.ls[[myfilt]][[myrun]] <- SCTransform(expts.ls[[myfilt]][[myrun]], verbose = FALSE, new.assay.name = myassay, vars.to.regress = regressions[[myregress]])
+      }
+    
+      # Calculate pca
+      mypca <- gsub("SCT", "pca", myassay)
+      mypcakey <- paste(gsub("/.", "", mypca), "_", sep = "")
+      expts.ls[[myfilt]][[myrun]] <- RunPCA(expts.ls[[myfilt]][[myrun]], verbose = FALSE, assay = myassay,
+                                  reduction.name = mypca, reduction.key = mypcakey)
+      
+      # Create umap
+      myumap <- gsub("pca", "umap", mypca)
+      myumapkey <- paste(gsub("/.", "", myumap), "_", sep = "")
+      expts.ls[[myfilt]][[myrun]] <- RunUMAP(expts.ls[[myfilt]][[myrun]], dims = 1:30, assay = myassay,
+                                   reduction = mypca, reduction.name = myumap, reduction.key = myumapkey)
+    } 
+  }
+}
+```
+
+### Plot UMAP and PCA
+
+```{r, echo=FALSE}
+for (myfilt in names(expts.ls)) {
+  for (myrun in names(expts.ls[[myfilt]])) {
+    for (myregress in names(regressions)) {
+      myassay <- ifelse(myregress == "noregression", "SCT", gsub("regress", "SCT", myregress))
+      mypca <- gsub("SCT", "pca", myassay)
+      plot(DimPlot(expts.ls[[myfilt]][[myrun]], reduction = mypca)  + labs(title = sprintf("%s: %s", myrun, myregress)))
+    
+      myumap <- gsub("SCT", "umap", myassay)
+      plot(DimPlot(expts.ls[[myfilt]][[myrun]], reduction = myumap)  + labs(title = sprintf("%s: %s", myrun, myregress)))
+    }
+  }
+}
+```
+
+### Save the data
+
+```{r, echo=FALSE}
+# Save the file
+for (myfilt in names(expts.ls)) {
+  file2save <- sprintf("aml_eto.regressSO.%s.%s.rds", myfilt, Sys.Date())
+  print(sprintf("%s objects:  Saving scaled/normalized/regressed data in individual objects in %s", myfilt, file2save))
+  saveRDS(expts.ls[[myfilt]], file = paste(directory$rda, file2save, sep = "/"))
+}
+```
+
+```{r, echo=FALSE}
+sessionInfo()
+```

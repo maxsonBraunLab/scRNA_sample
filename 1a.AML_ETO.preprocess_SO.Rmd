@@ -1,0 +1,369 @@
+---
+title: "Create and Preprocess AML-ETO SO"
+author: "TLusardi"
+date: "11/02/2020"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+params:
+  local: TRUE
+---
+
+### Set up libraries and directories
+
+```{r "setup_libs", include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(networkD3)
+library(patchwork)
+library(dplyr)
+
+runs2process = c("dmso", "ava", "ory", "combo")
+#importNew <- "clust"
+#importDate <- "2020-10-26"
+
+# ADT Antibodies
+antibodies <- c(CD45RA = "ab_CD45RA", CD123 = "ab_CD123", CD10 = "ab_CD10", CD90 = "ab_CD90",
+                CD34 = "ab_CD34", CD38 = "ab_CD38", CD366 = "ab_CD366", CD99 = "ab_CD99")
+adt.ab2gene <- c('ab-CD45RA' = "PTPRC", 'ab-CD123' = "IL3RA", 'ab-CD10' = "MME", 'ab-CD90' = "THY1",
+                 'ab-CD34' = "CD34", 'ab-CD38' = "CD38", 'ab-CD366' = "HAVCR2", 'ab-CD99' = "CD99")
+```
+
+```{r "setup_vars", include=FALSE}
+directory = list(raw = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/raw",
+                 rda = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/rda")
+
+# If raw exists, continue, otherwise, exit.
+if (!dir.exists(directory$raw)) {
+  message(sprintf("ERROR: source directory does not exist %s", directory$raw))
+  knitr::knit_exit()
+}
+
+# If rda does not exist, create it
+if (!dir.exists(directory$rda)) {
+  dir.create(directory$rda)
+  if (!dir.exists(directory$rda)) {
+    message(sprintf("ERROR: could not create directory %s", directory$rds))
+    knitr::knit_exit()
+  }
+}
+
+# Create a list of variables used to create the SO
+ab_gene <- c(ab_CD45RA = "PTPRTC", ab_CD123 = "IL3RA", ab_CD10 = "MME", ab_CD90 = "THY1",
+             ab_CD34 = "CD34", ab_CD38 = "CD38", ab_CD366 = "HAVCR2", ab_CD99 = "CD99")
+settings.ls <- list()
+
+```
+
+### Read in data by run
+
+Customize here as required per cellranger output naming convention
+* Note that "_" is reserved in Seurat (used as delimiter between an object key and a feature name)
+  +  https://github.com/satijalab/seurat/issues/3219
+  
+
+```{r, "readraw", echo=FALSE}
+# Get a list of directories with data
+runs <- list.dirs(path = directory$raw, full.names = FALSE, recursive = FALSE)
+# Select the runs of interest
+runs <- runs[grepl("amleto", runs)]
+select_index <- 2
+names(runs) <- tolower(tstrsplit(runs, "_")[[select_index]])
+# Consistent name w/TB
+names(runs)[names(runs) == "avaory"] <- "combo"
+
+# Read in by run
+expts.ls <- list()
+for (myrun in runs2process) { 
+  mydata = Read10X(data.dir = sprintf("%s/%s/outs/filtered_feature_bc_matrix", directory$raw, runs[[myrun]]))
+
+  # Gene Expression matrix
+  gex <- mydata$`Gene Expression`
+  
+  # Antibody matrix 
+  #  Replace _ with - to suppress seurat error
+  adt <- mydata$`Antibody Capture`[,]
+  adt_abs <- rownames(adt)
+  rownames(adt) <- gsub("_", "-", rownames(adt))
+  
+  updateADT <- FALSE
+  if (updateADT) {
+    # Fix the antibody names 
+    # ** THIS CAN BE DONE at the CellRanger phase - just put the NAME in. I like ab_<name> so it can be distinguished from the rna
+    myfeatures <- fread(sprintf("%s/%s/outs/feature_reference.csv", directory$raw, runs[[myrun]]))
+    myfeatures[, matrix.rowName := paste(name, .I-1, sep = ".")]
+    myfeatures[matrix.rowName == paste(name, 0, sep = "."), matrix.rowName := name]
+    myfeatures[, antibody := tstrsplit(id, "-")[[6]]]
+    myfeatures[, abID := paste("ab", antibody, sep = "_") ]
+    myfeatures[, abGene := adt.ab2gene[abID]]
+    adt.rownames <- myfeatures$abID
+    names(adt.rownames) <- myfeatures$matrix.rowName
+  
+    # Update ADT row names
+    if (sum(rownames(adt) %in% myfeatures$matrix.rowName) > 0) {
+      rownames(adt) <- adt.rownames[rownames(adt)]
+    }
+  }
+  
+  # Update column names 
+  colnames(gex) <- paste(myrun, gsub("-1", "", colnames(gex)), sep = ".")
+  colnames(adt) <- paste(myrun, gsub("-1", "", colnames(adt)), sep = ".")
+  
+  # Confirm that the same cells are present in the same order for each matrix
+  if (all.equal(colnames(adt), colnames(gex))) {
+    print("Column order consistent - antibody and gene expression")
+  } else {
+    print("Column order inconsistent among antibody and gene expression - need to fix it.")
+  }
+
+  # Consider the counts per gene
+  print("***********************************************")
+  # Summarize Features
+  print(sprintf("CellRanger Output %s: %i features in %i cells", myrun,
+                dim(gex)[1], dim(gex)[2]))
+  minFeat <- min(Matrix::rowSums(gex))
+  print(sprintf("Feature counts range %i to %i", minFeat, max(Matrix::rowSums(gex))))
+  print(sprintf("Features with %i counts: %i", minFeat,
+                sum(Matrix::rowSums(gex) == minFeat)))
+  print(sprintf("Features with 1-3 counts: %i", 
+                sum(Matrix::rowSums(gex) > 0 & Matrix::rowSums(gex) < 4)))
+  minCells <- min(Matrix::colSums(gex))
+  print(sprintf("Cell feature counts range %i to %i", minCells,
+                max(Matrix::colSums(gex))))
+  print(sprintf("Cells with %i counts: %i", minCells,
+                sum(Matrix::colSums(gex) == minCells)))
+
+  # Summarize antibody counts
+  print(sprintf("CellRanger Antibody Output %s: %i features in %i cells", myrun,
+                dim(adt)[1], dim(adt)[2]))
+  minAb <- min(Matrix::rowSums(adt))
+  print(sprintf("Antibody counts range %i to %i", minAb, max(Matrix::rowSums(adt))))
+  print(sprintf("Antibody with %i counts: %i", minAb,
+                sum(Matrix::rowSums(adt) == minAb)))
+  minAbCells <- min(Matrix::colSums(adt))
+  print(sprintf("Cell antibody counts range %i to %i", minAbCells,
+                max(Matrix::colSums(adt))))
+  print(sprintf("Cells with %i counts: %i", minAbCells,
+                sum(Matrix::colSums(adt) == minAbCells)))
+
+  # Create Seurat Object
+  # Set thresholds for cell, feature inclusion
+  min.cells = 3
+  min.features = 200
+  settings.ls[["step_CreateSeuratObject"]][["min.cells"]] <- min.cells
+  settings.ls[["step_CreateSeuratObject"]][["min.features"]] <- min.features
+
+  # Initialize the Seurat object with the raw (non-normalized data).
+  myso <- CreateSeuratObject(counts = gex, project = myrun,
+                             min.cells = min.cells, min.features = min.features)
+  
+  print(sprintf("%s: %i cells in ADT matrix that are not present in gene expression matrix", myrun, sum(!(colnames(adt) %in% colnames(gex)))))
+  print(sprintf("%s: %i cells in gene expression matrix that are not present in ADT matrix", myrun, sum(!(colnames(gex) %in% colnames(adt)))))
+  
+  myso[["ADT"]] <- CreateAssayObject(counts = adt[, colnames(myso)])
+  
+  if (updateADT) {
+    myso@misc$adt.features <- myfeatures
+  }
+  
+  # Define adt - gene relationship
+  myso@misc$ab_gene <- ab_gene
+  
+  expts.ls[[myrun]] <- myso
+}
+```
+
+### Take a quick look at ADT concordance
+
+```{r, echo = FALSE}
+for (myrun in names(expts.ls)) { 
+  myso <- expts.ls[[myrun]]
+  for (myab in rownames(myso@assays$ADT)) {
+    if (updateADT) {
+      myfeatures <- myso@misc$adt.features
+      mygene <- myfeatures[abID == gsub("-", "_", myab), abGene]
+    } else  {
+      mygene <- adt.ab2gene[myab]
+    }
+    mygene <- gsub("ab_", "", mygene)
+    if (!(mygene %in% rownames(myso))) {
+      print(sprintf("%s:  %s RNA present in fewer than %i cells in %s object", myab, mygene, min.cells, myrun))
+    } else {
+      plot(myso@assays$RNA[mygene, ], myso@assays$ADT[myab,], log = "y", pch = 20, xlab = mygene, ylab = myab, main = myrun)
+    }
+  }
+}
+```
+
+### Summary Plots
+Summarize data to make filtering decisions
+
+```{r, "summaryPlot", echo=FALSE}
+for (myrun in names(expts.ls)) {
+  myso <- expts.ls[[myrun]]
+  
+  # Quantify % mitochondrial features
+  myso[["percent.mt"]] <- PercentageFeatureSet(myso, pattern = "^MT-")
+  plot(VlnPlot(myso, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), pt.size = 0.5, ncol = 3) )
+  
+  # Plot density function of percent.mt
+  # Consider how much to include/exclude
+  colors = c('#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#ffff33','#a65628','#f781bf','#999999')
+  probs = c(0.99, 0.95, 0.9, 0.85, 0.80, 0.75, 0.70)
+  cut_opts = quantile(myso@meta.data$percent.mt, probs = probs)
+  p1 <- plot(density(myso@meta.data$percent.mt), main = sprintf("Distribution of %% Mitochondrial Cells %s", myrun))
+  for (i in 1:length(cut_opts)) {
+    p1 <- abline(v = cut_opts[i], col = colors[i])
+  }
+  legend_text = paste(probs, round(cut_opts, 1), sep = " - ")
+  p1 <- legend(x = "topright", legend = legend_text, col = colors[1:length(probs)], pch = 16)
+  
+  # Plot density function of nFeature_RNA
+  # Consider how much to include/exclude
+  colors = c('#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#ffff33','#a65628','#f781bf','#999999')
+  probs = c(0.99, 0.95, 0.9, 0.85, 0.15, 0.10, 0.05, 0.01)
+  cut_opts = quantile(myso@meta.data$nFeature_RNA, probs = probs)
+  p1 <- plot(density(myso@meta.data$nFeature_RNA), main = sprintf("Distribution of nFeature_RNA Cells %s", myrun))
+  for (i in 1:length(cut_opts)) {
+    p1 <- abline(v = cut_opts[i], col = colors[i])
+  }
+  legend_text = paste(probs, round(cut_opts, 1), sep = " - ")
+  p1 <- legend(x = "topright", legend = legend_text, col = colors[1:length(probs)], pch = 16)
+  expts.ls[[myrun]] <- myso
+  
+  # Plot density function of nCount_RNA
+  # Consider how much to include/exclude
+  colors = c('#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#ffff33','#a65628','#f781bf','#999999')
+  probs = c(0.99, 0.95, 0.9, 0.85, 0.15, 0.10, 0.05, 0.01)
+  cut_opts = quantile(myso@meta.data$nCount_RNA, probs = probs)
+  p1 <- plot(density(myso@meta.data$nCount_RNA), main = sprintf("Distribution of nCount_RNA Cells %s", myrun))
+  for (i in 1:length(cut_opts)) {
+    p1 <- abline(v = cut_opts[i], col = colors[i])
+  }
+  legend_text = paste(probs, round(cut_opts, 1), sep = " - ")
+  p1 <- legend(x = "topright", legend = legend_text, col = colors[1:length(probs)], pch = 16)
+  expts.ls[[myrun]] <- myso
+
+}
+```
+  
+### Preprocess Runs
+Based on summary plots, filter out cells with excess mitochondrial RNA, low/high counts
+Assign Cell Cycle Scores
+
+* Note that the cell cycle scores are influenced by the population of cells (before and after filtering give different results)  
+- A casual look showed that all of the scores are different, differences are all different (so it's not just a shift), and a small number of Phase assignments are different (~10% from an n=1 off the cuff analysis))
+
+
+```{r, "preprocess", echo=FALSE}
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+preproc.expts.ls <- list()
+for (myrun in names(expts.ls)) { 
+  myso <- expts.ls[[myrun]]
+
+  # Filter high mitochondria cells
+  mitocut = 12
+  settings.ls[["step_filter"]][["mitocut"]] <- mitocut
+  nmitofilt <- sum(myso@meta.data$percent.mt > mitocut)
+  print(sprintf("%s:  Filter cells > %i%% mitochondria: %i/%i (%.1f%%)", myrun, mitocut, nmitofilt, ncol(myso), nmitofilt/ncol(myso)*100))
+  
+  # Filter high and low RNA count cells
+  minCount = 200
+  maxCount = 25000
+  settings.ls[["step_filter"]][["minCount"]] <- minCount
+  settings.ls[["step_filter"]][["maxCount"]] <- maxCount
+  nfeatfilt <- sum(myso@meta.data$nCount_RNA < minCount | myso@meta.data$nCount_RNA > maxCount)
+  print(sprintf("%s:  Filter cells with %i > nCount > %i: %i/%i (%.1f%%)",
+                myrun, minCount, maxCount, nfeatfilt, ncol(myso), nfeatfilt/ncol(myso)*100))
+  
+  # Add settings info to the object under "misc"
+  myso@misc$settings <- settings.ls
+  
+  myso <- subset(myso, subset = nCount_RNA > minCount & nCount_RNA < maxCount & percent.mt < mitocut)
+  print(sprintf("Filtered %s:  %i cells, %i features", myrun, dim(myso)[2], dim(myso)[1]))
+  
+  # Assign cell cycle scores
+  myso <- CellCycleScoring(myso, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+  
+  # Per Seurat "Alternate Workflow" to reduce loss of relevant cell cycle information (eg, during hematopoiesis)
+  myso$CC.Difference <- myso$S.Score - myso$G2M.Score
+  
+  preproc.expts.ls[[myrun]] <- myso
+}
+```
+
+### Normalize & Scale 
+Quick look to assess regression needs
+
+```{r, "regressPeek", echo=FALSE}
+vars2regress <- list(none = "none", mito = "percent.mt",
+                     CC = "Phase", CC.mito = c("Phase", "percent.mt"),
+                     Diff = "CC.Difference", Diff.mito = c("CC.Difference", "percent.mt"))
+  
+for (myrun in runs2process[1]) {
+  for (myregress in names(vars2regress)) {
+    myso <- preproc.expts.ls[[myrun]]
+    
+    # Normalize counts
+    myso <- NormalizeData(myso)
+  
+    # Identify variable genes
+    genecount <- nrow(myso)
+    myso <- FindVariableFeatures(myso, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+  
+    # Scale Counts
+    if (myregress == "none") {
+      myso <- ScaleData(myso)
+    } else {
+      myso <- ScaleData(myso, vars.to.regress = vars2regress[[myregress]])
+    }
+  
+    # Perform PCA
+    myso <- RunPCA(myso)
+  
+    plot1 <- (DimPlot(myso, reduction = "pca", group.by = "Phase", split.by = "Phase") +
+           plot_annotation(title = sprintf("%s - %s regression", myrun, myregress)))
+    plot2 <- (FeaturePlot(myso, reduction = "pca", features = "percent.mt", split.by = "Phase") +
+           plot_annotation(title = sprintf("%s - %s regression", myrun, myregress)))
+    plot(plot1 + plot2)
+  }
+}
+```
+
+### Assign Cell-Cycle Scores
+So - filter first, then assign cell cycle scores
+
+```{r, "assignCC", echo=FALSE}
+# Plot some cell cycle genes
+for (myrun in names(preproc.expts.ls)) {
+  myso <- preproc.expts.ls[[myrun]]
+  plot(RidgePlot(myso, features = c("NASP", "USP1", "TUBB4B", "HMGB2"), group.by = "Phase", ncol = 2))
+  print(sprintf("Sum the counts in s-phase genes across %i cells", ncol(myso)))
+  print(Matrix::rowSums(myso@assays$RNA@counts[rownames(myso) %in% s.genes, ]))
+  print(sprintf("Sum the counts in g2m-phase genes across %i cells", ncol(myso)))
+  print(Matrix::rowSums(myso@assays$RNA@counts[rownames(myso) %in% g2m.genes, ]))
+}
+```
+
+### Save Data
+If you add filtering, make sure that you adjust the file saving accordingly
+
+```{r, echo=FALSE}
+file2save <- sprintf("aml_eto.preprocSO.nofilt.%s.rds", Sys.Date())
+print(sprintf("Saving preprocessed data in individual objects in %s", file2save))
+saveRDS(preproc.expts.ls, file = paste(directory$rda, file2save, sep = "/"))
+```
+
+```{r, echo=FALSE}
+sessionInfo()
+```
+

@@ -1,0 +1,298 @@
+---
+title: "Create AML-ETO SO"
+author: "TLusardi"
+date: "10/17/2020"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+params:
+  local: TRUE
+---
+
+#### Operations   
+* Integrate objects by regression
+* Cluster Integrated Object
+* Compare clustering - integrated vs. inidvidual with transferred cluster identities
+
+##### Data Import Options - File naming
+*importDate - select the creation date for the desired object
+* Filtering - build in ability to process differently filtered objects in parallel
+  + nofilt:  objects include all cells that pass min/max counts, max % mitochondria
+  + filtered:  objects filtered to have similar numbers of cells, counts/cell  
+  
+##### Regression Options (in each object)
+* regress - start from preprocessed objects
+  + noregress
+  + regress.CC - regress on cell cycle - probably not the best option as it removes any cell cycle information that may be important for differentiating cells
+  + regress.diff - regress on the difference in cell cycle values; per Seurat notations, it preserves cell cycle information relevant to development
+  
+### Set up libraries and directories
+
+```{r "setup_libs", include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(networkD3)
+library(patchwork)
+library(dplyr)
+filts2process = c("nofilt", "filtered")[1]
+importDate <- "2020-11-04"
+runs2process = c("dmso", "ava", "ory", "combo")
+```
+
+
+```{r "readObjects", include=FALSE}
+directory = list(raw = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/raw",
+                 rda = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/rda")
+
+expts.ls <- list()
+for (myfilt in filts2process) {
+  expts.ls[[myfilt]] <- readRDS(sprintf("%s/aml_eto.indivClustSO.%s.%s.rds", directory$rda, myfilt, importDate))
+}
+```
+
+### Integrate the objects
+
+Can probably collapse this into the expts.ls object... Don't want to validate the process right now.
+
+```{r, "integrate", echo=FALSE}
+# Needed to avoid error in getGlobalsandPackages 
+options(future.globals.maxSize= 3530*1024^2)
+
+expts.integrated.ls <- list()
+for (myfilt in filts2process) {
+  for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
+    my.features <- SelectIntegrationFeatures(object.list = expts.ls[[myfilt]], nfeatures = 3000, assay = rep(myregress, 4))
+    myiso <- PrepSCTIntegration(object.list = expts.ls[[myfilt]], anchor.features = my.features, verbose = FALSE, assay = rep(myregress, 4))
+    my.anchors <- FindIntegrationAnchors(object.list = myiso, normalization.method = "SCT", reference = 1, scale = FALSE,
+                                         anchor.features = my.features, verbose = TRUE)
+    integratedName <- paste("Integrated", myregress, sep = "_")
+    myintegrated <- IntegrateData(anchorset = my.anchors, normalization.method = "SCT", verbose = FALSE, new.assay.name = integratedName)
+    expts.integrated.ls[[myfilt]][[myregress]] <- myintegrated
+  }
+}
+```
+
+### Dim reduction on integrated objects
+
+```{r, "integrated_dimreduct", warning=FALSE, echo=FALSE, fig.height=6, fig.width=6}
+for (myfilt in filts2process) {
+  for (myregress in names(expts.integrated.ls[[myfilt]])) {
+    myso <- expts.integrated.ls[[myfilt]][[myregress]]
+    myassay <- paste("Integrated", myregress, sep = "_")
+    myreduction <- paste("pca", myassay, sep = "_")
+    myumap <- gsub("pca", "umap", myreduction)
+    myso <- RunPCA(myso, verbose = FALSE, assay = myassay, reduction.name = myreduction)
+    myso <- RunUMAP(myso, dims = 1:30, assay = myassay, reduction = myreduction, reduction.name = myumap)
+  
+    # Create a factor for orig ident
+    exptlevels <- c("dmso", "ava", "ory", "combo")
+    myso$expt.fac <- factor(myso$orig.ident, levels = exptlevels)
+  
+    expts.integrated.ls[[myfilt]][[myregress]] <- myso
+  }
+}
+```
+
+### Plot Integrated results
+use per-experiment clusters
+  
+```{r, "plot_integrated_dimreduct", warning=FALSE, echo=FALSE, fig.height=6, fig.width=6}
+# This should ultimately be stored in so@misc from step 3.
+dmsoLevels.ls <- list(nofilt = c("early_1", "early_2", "early_1_2", "early_1b", "early_2b",
+                                 "mid_1", "mid_2", "mid_3", "mid_2_3", "mid_3a" , "mid_3b",
+                                 "late_1", "lone_mid", "lone_1", "lone_2"))
+idMarkers <- c("SOX4", "CEBPD", "CD14")
+
+for (myfilt in filts2process) {
+  dmsoLevels <- dmsoLevels.ls[[myfilt]]
+  for (myregress in names(expts.integrated.ls[[myfilt]])) {
+    myso <- expts.integrated.ls[[myfilt]][[myregress]]
+    mymeta <- data.table(myso@meta.data, keep.rownames = "CellID")
+  
+    # Combine cluster labels from dmso and transferred labels (this should be up where the labels are transferred)
+    mymeta[, txClusterID := get(paste(myregress, "predicted.id", sep = "_"))]
+    mymeta[orig.ident == "dmso", txClusterID := get(paste(myregress, "clust_label", sep = "_"))]
+    mymeta[, txClusterID.fac := factor(txClusterID, levels = dmsoLevels)]
+    if (all.equal(colnames(myso), mymeta$CellID)) {
+      myso[["txClusterID"]] <- mymeta$txClusterID
+      myso[["txClusterID.fac"]] <- mymeta$txClusterID.fac
+    } else {
+      print("ERROR: Cluster Labels not transferred")
+    }
+  
+    myassay <- paste("Integrated", myregress, sep = "_")
+    myreduction <- paste("pca", myassay, sep = "_")
+    myumap <- gsub("pca", "umap", myreduction)
+    groupby <- paste(myregress, "snn_res.0.8", sep = "_")
+  
+    # Plot with per run x regression clusters
+    myplot <- DimPlot(myso, split.by = "expt.fac", group.by = groupby, ncol = 2)
+    plot(myplot + plot_annotation(title = "Cluster Labels from Individual Sample", subtitle = myregress))
+  
+    # Plot with transferred cluster labels
+    myplot <- DimPlot(myso, split.by = "expt.fac", group.by = "txClusterID.fac", ncol = 2)
+    plot(myplot + plot_annotation(title = "Cluster Labels transferred from DMSO", subtitle = myregress))
+  
+    myplot <- FeaturePlot(myso, features = idMarkers[1:3], split.by = "expt.fac",
+                          reduction = myumap, slot = "scale.data", pt.size = 0.25)
+    plot(myplot + plot_annotation(title = "Cluster Marker Genes", subtitle = myregress))
+  
+    # Update expts.integrated.ls with new meta.data
+    expts.integrated.ls[[myfilt]][[myregress]] <- myso
+  }
+}
+```
+
+### Cluster Integrated objects
+Not sure that this is necessary. Could be interesting, but not right now.
+
+```{r, echo=FALSE}
+for (myfilt in filts2process) {
+  for (myregress in names(expts.integrated.ls[[myfilt]])) {
+    myso <- expts.integrated.ls[[myfilt]][[myregress]]
+    myassay <- paste("Integrated", myregress, sep = "_")
+    myreduction <- paste("pca", myassay, sep = "_")
+    myumap <- gsub("pca", "umap", myreduction)
+  
+    myso <- FindNeighbors(myso, reduction = myreduction, dims = 1:10, assay = myassay)
+    mygraph <- paste(myassay, "snn", sep = "_")
+    myso <- FindClusters(myso, graph.name = mygraph, resolution = 0.8)
+  
+    expts.integrated.ls[[myregress]] <- myso
+  }
+}
+```
+
+### Plot cluster data
+Skip unless reclustering the integrated object
+
+```{r, "plotClusters", echo=FALSE}
+for (myfilt in filts2process) {
+  for (myregress in names(expts.integrated.ls[[myfilt]])) {
+    mygroup <- sprintf("Integrated_%s_snn_res.0.8", myregress)
+    myassay <- paste("Integrated", myregress, sep = "_")
+    myreduction <- paste("pca", myassay, sep = "_")
+    myumap <- gsub("pca", "umap", myreduction)
+    plot(DimPlot(expts.integrated.ls[[myregress]], split.by = "expt.fac", group.by = mygroup, ncol = 2))
+    plot(FeaturePlot(expts.integrated.ls[[myregress]], features = idMarkers, reduction = myumap, slot = "scale.data", pt.size = 0.25))
+  }
+}
+```
+
+### Find Markers for Each Cluster
+
+```{r, "FindMarkersIntegrated", echo=FALSE, fig.height = 10, fig.width=8}
+for (myfilt in filts2process) {
+  for (myregress in c("SCT.Diff")) {
+    myso <- expts.integrated.ls[[myfilt]][[myregress]]
+    Idents(myso) <- "txClusterID.fac"
+    myassay <- paste("Integrated", myregress, sep = "_")
+    mymarkers <- FindAllMarkers(myso, assay = myassay, min.pct = 0.25) 
+    mydmsoMarkers <- FindAllMarkers(subset(myso, subset = orig.ident == "dmso"), assay = myassay, min.pct = 0.25)
+  }
+}
+
+# Set Thresholds
+lfc.min <- 1
+pval.max <- 0.005
+Idents(myso) <- "txClusterID.fac"
+
+ClusterMarkers.dt <- data.table(mymarkers, keep.rownames = "GeneRow")
+filtmarkers <- ClusterMarkers.dt[avg_logFC > lfc.min & p_val_adj < pval.max, ]
+top10 <- filtmarkers %>% group_by(cluster) %>% top_n(n=10, wt = avg_logFC)
+
+DmsoMarkers.dt <- data.table(mydmsoMarkers, keep.rownames = "GeneRow")
+filtdmsomarkers <- DmsoMarkers.dt[avg_logFC > lfc.min & p_val_adj < pval.max, ]
+top10dmso <- filtdmsomarkers %>% group_by(cluster) %>% top_n(n=10, wt = avg_logFC)
+
+myplot <- DoHeatmap(myso, features = top10$gene) + NoLegend()
+plot(myplot + plot_annotation(title = sprintf("%s, Integrated Object, adjp < %.3f", myregress, pval.max)))
+myplot <- DoHeatmap(myso, features = top10dmso$gene) + NoLegend()
+plot(myplot + plot_annotation(title = sprintf("%s, DMSO Object, adjp < %.3f", myregress, pval.max)))
+```
+### ID DE Genes - DMSO vs. Combo
+
+```{r, "deCombo", echo=FALSE}
+myso <- expts.integrated.ls$nofilt$SCT.Diff
+clustDE.ls <- list()
+Idents(myso) <- "orig.ident"
+for (myrun in c("ava", "ory", "combo")) {
+  runclust.ls <- list()
+  allclust <- levels(myso@meta.data$txClusterID.fac)[levels(myso@meta.data$txClusterID.fac) %in% unique(myso@meta.data$txClusterID)]
+  for (myclust in allclust) {
+    mysubso <- subset(myso, subset = txClusterID.fac == myclust)
+    runclust.ls[[myclust]] <- data.table(FindMarkers(mysubso, ident.1 = "dmso", ident.2 = myrun), keep.rownames = "gene")
+  }
+  clustDE.ls[[myrun]] <- rbindlist(runclust.ls, use.names = TRUE, idcol = "ClusterID")
+}
+clustDE.dt <- rbindlist(clustDE.ls, use.names = TRUE, idcol = "Expt")
+```
+### General Plots 
+
+```{r, echo=FALSE}
+myso <- expts.integrated.ls$nofilt$SCT.Diff
+mymeta <- data.table(myso@meta.data, keep.rownames = "CellID")
+
+# Plot cells/cluster x Expt
+clustCts <- mymeta[, .N, by = .(expt.fac, txClusterID.fac)]
+clustCts[, txClusterID.fac := droplevels(txClusterID.fac)]
+clustCts[, pctCells := N/sum(N)*100, by = expt.fac]
+plotcolors <- c("blue", "red", "yellow", "orange")
+
+barplot(data = clustCts, pctCells ~ expt.fac + txClusterID.fac, beside = TRUE, 
+        col = plotcolors, horiz = FALSE, las = 1,
+        xlab = "Cluster Labels Transferred from DMSO",
+        ylab = "% Cells/Expt", cex.names = 0.8,
+        main = "Regressed on CC Difference")
+legend("topright", legend = levels(clustCts$expt.fac), col = plotcolors, pch = 20)
+
+clustDE.dt[p_val_adj < 0.5, .N, by = .(Expt, ClusterID)]
+pval.max <- 0.05
+lfc.min <- 0.05
+
+```
+
+### Heatmap of sig genes
+Significant genes in combo vs. dmso
+
+```{r, echo=FALSE}
+lfc.min <- 0.5
+pval.max <- 0.05
+min.pct <- 0.1
+
+myso <- expts.integrated.ls$nofilt$SCT.Diff
+mymeta <- data.table(myso@meta.data, keep.rownames = "CellID")
+
+for (myclust in allclust) {
+  # Create a subset of cells in myclust
+  mysubso <- subset(myso, subset = txClusterID.fac == myclust)
+  Idents(mysubso) <- "orig.ident"
+  
+  # Define significant genes
+  sigGenes.dt <- clustDE.dt[Expt == "combo" &
+                              pct.1 > 0.25 & pct.2 > 0.25 &
+                              abs(avg_logFC) > lfc.min &
+                              p_val_adj < pval.max &
+                              ClusterID == myclust, ]
+  
+  top10clust <- sigGenes.dt %>% group_by(Expt) %>% top_n(n=25, wt = avg_logFC)
+
+  # Plot significant genes
+  IntAssay <- DefaultAssay(mysubso)
+  DefaultAssay(mysubso) <- IntAssay
+  myplot <- DoHeatmap(mysubso, features = top10clust$gene)
+  plot(myplot + plot_annotation(title = sprintf("%s cluster %s, Integrated Object, adjp < %.3f", myregress, myclust, pval.max)))
+}
+```
+
+```{r, echo=FALSE}
+FeaturePlot(expts.integrated.ls$nofilt$SCT.Diff, features = "CD47", assay = "RNA", 
+            split.by = "orig.ident")
+```
