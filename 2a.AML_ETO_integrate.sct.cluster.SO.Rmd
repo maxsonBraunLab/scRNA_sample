@@ -46,7 +46,8 @@ library(patchwork)
 library(dplyr)
 
 runs2process = c("dmso", "ava", "ory", "combo")
-importDate <- "2020-11-03"
+baseline = "dmso"
+importDate <- "2021-01-05"
 ```
 
 ```{r "setup_vars", include=FALSE}
@@ -54,12 +55,6 @@ directory = list(raw = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.
                  rda = "/Users/lusardi/Documents/CEDAR/Projects/3.ASXL_mutant/1.AML_ETO/analysis/data/rda")
 
 expts.ls <- readRDS(sprintf("%s/aml_eto.preprocSO.nofilt.%s.rds", directory$rda, importDate))
-```
-
-### Preview Clustering
-
-```{r, echo=FALSE}
-
 ```
 
 ### Plot Counts Comparisons
@@ -101,73 +96,235 @@ for (myfeature in plotFeatures) {
           lwd = 2)
   }
 }
-
-temp <- merge(x = expts.ls$dmso, y = expts.ls[c("ava", "ory", "combo")])
-temp <- merge(x = expts.ls$ava, y = expts.ls[c("dmso", "ory", "combo")])
-temp <- merge(x = expts.ls$ory, y = expts.ls[c("dmso", "ava", "combo")])
-
-all.equal(expts.ls$dmso@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$dmso), grepl("dmso", colnames(temp))])
-all.equal(expts.ls$ava@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$ava), grepl("ava", colnames(temp))])
-all.equal(expts.ls$ory@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$ory), grepl("ory", colnames(temp))])
-all.equal(expts.ls$combo@assays$RNA@counts, temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$combo), grepl("combo", colnames(temp))])
-
-plot(x = expts.ls$ory@assays$RNA@counts, y = temp@assays$RNA@counts[rownames(temp) %in% rownames(expts.ls$combo), grepl("combo", colnames(temp))] )
 ```
-
-### Integrate the objects
-
-```{r, "integrate", echo=FALSE}
-# Needed to avoid error in getGlobalsandPackages 
-#options(future.globals.maxSize= 3530*1024^2)
-
-expts.integrated.ls <- list()
-for (myregress_feat in c("no", "yes")) {
-  for (myregress in c("SCT", "SCT.CC", "SCT.Diff")) {
-    my.features <- SelectIntegrationFeatures(object.list = expts.ls[[myfilt]], nfeatures = 3000, assay = rep(myregress, 4))
-    myiso <- PrepSCTIntegration(object.list = expts.ls[[myfilt]], anchor.features = my.features, verbose = FALSE, assay = rep(myregress, 4))
-    my.anchors <- FindIntegrationAnchors(object.list = myiso, normalization.method = "SCT", reference = 1, scale = FALSE,
-                                         anchor.features = my.features, verbose = TRUE)
-    integratedName <- paste("Integrated", myregress, sep = "_")
-    myintegrated <- IntegrateData(anchorset = my.anchors, normalization.method = "SCT", verbose = FALSE, new.assay.name = integratedName)
-    expts.integrated.ls[[myfilt]][[myregress]] <- myintegrated
-  }
-}
-```
-
-### Integrate
-
 
 ### Normalize & Scale
 Use SCTransform with regression options noted
+Calculate pca and umap 
+
+Preserve all features for Precepts compatibility
 
 ```{r, "runSCT", warning=FALSE, echo=FALSE}
 regressions <- list(noregression = "NULL",
                     regress.CC = c("S.Score", "G2M.Score"),
                     regress.Diff = c("CC.Difference"))    
+regression2use <- "regress.Diff"
 
-for (myfilt in names(expts.ls)) {
-  for (myregress in names(regressions)) {
-    for (myrun in names(expts.ls[[myfilt]])) {
-      if (myregress == "noregression") {
-        myassay <- "SCT"
-        expts.ls[[myfilt]][[myrun]] <- SCTransform(expts.ls[[myfilt]][[myrun]], verbose = FALSE, new.assay.name = myassay)
-      } else {
-        myassay <- gsub("regress", "SCT", myregress)
-        expts.ls[[myfilt]][[myrun]] <- SCTransform(expts.ls[[myfilt]][[myrun]], verbose = FALSE, new.assay.name = myassay, vars.to.regress = regressions[[myregress]])
-      }
+for (myregress in regression2use) {
+  for (myrun in names(expts.ls)) {
+    myso <- expts.ls[[myrun]]
+    if (myregress == "noregression") {
+      myassay <- "SCT"
+      myso <- SCTransform(myso, verbose = FALSE, new.assay.name = myassay,
+                            variable.features.n = nrow(myso@assays$RNA@counts))
+    } else {
+      myassay <- gsub("regress", "SCT", myregress)
+      myso <- SCTransform(myso, verbose = FALSE, new.assay.name = myassay,
+                            vars.to.regress = regressions[[myregress]],
+                            variable.features.n = nrow(myso@assays$RNA@counts))
+    }
     
-      # Calculate pca
-      mypca <- gsub("SCT", "pca", myassay)
-      mypcakey <- paste(gsub("/.", "", mypca), "_", sep = "")
-      expts.ls[[myfilt]][[myrun]] <- RunPCA(expts.ls[[myfilt]][[myrun]], verbose = FALSE, assay = myassay,
-                                  reduction.name = mypca, reduction.key = mypcakey)
+    # Calculate pca
+    mypca <- gsub("SCT", "pca", myassay)
+    mypcakey <- paste(gsub("/.", "", mypca), "_", sep = "")
+    myso <- RunPCA(myso, verbose = FALSE, assay = myassay,
+                     reduction.name = mypca, reduction.key = mypcakey)
       
-      # Create umap
-      myumap <- gsub("pca", "umap", mypca)
-      myumapkey <- paste(gsub("/.", "", myumap), "_", sep = "")
-      expts.ls[[myfilt]][[myrun]] <- RunUMAP(expts.ls[[myfilt]][[myrun]], dims = 1:30, assay = myassay,
-                                   reduction = mypca, reduction.name = myumap, reduction.key = myumapkey)
-    } 
+    # Create umap
+    myumap <- gsub("pca", "umap", mypca)
+    myumapkey <- paste(gsub("/.", "", myumap), "_", sep = "")
+    myso <- RunUMAP(myso, dims = 1:30, assay = myassay,
+                      reduction = mypca, reduction.name = myumap, reduction.key = myumapkey)
+    
+    expts.ls[[myrun]] <- myso
+  } 
+}
+```
+
+### Optionally Plot Missing Features
+Note that features present in <= 4 cells do not make it through SCTransform
+
+```{r, "plotmissingfeat",echo=FALSE}
+if (TRUE) {
+  for (myrun in names(expts.ls)) {
+    myso <- expts.ls[[myrun]]
+    lostFeat <- rownames(myso@assays$RNA@counts)[!(rownames(myso@assays$RNA@counts) %in% rownames(myso@assays$SCT.Diff@counts))]
+    counts.per.feat <- apply(myso@assays$RNA@counts, 1, sum)
+    cells.per.feat <- Matrix::rowSums(myso@assays$RNA@counts > 0)
+    
+    # Plot counts and cells 
+    plot(x = log2(counts.per.feat), y = log2(cells.per.feat), pch = 20, cex = 0.5)
+    points(x = log2(counts.per.feat[lostFeat]), y = log2(cells.per.feat[lostFeat]), pch = 20, cex = 0.5, col = "red")
+  }
+}
+```
+
+### Cluster the individual runs
+Note: Ran individual PCA/UMAP on a subset of genes in 1a.    
+Run here on all genes? Not sure that this will substantially change anything.
+
+```{r, "iCluster", echo=FALSE, warning=FALSE, message=FALSE}
+for (myrun in names(expts.ls)) {
+  myso <- expts.ls[[myrun]]
+  
+  for (myregress in regression2use) {
+    myassay <- gsub("regress", "SCT", myregress)
+    mypca <- gsub("regress", "pca.SCT", myregress)
+    mypca_key <- gsub("regress", "pcaSCT_", myregress)
+    myfeatures <- rownames(myso@assays[[myassay]])
+    myumap <- gsub("pca", "umap", mypca)
+    
+    # Perform PCA on all features (note that non-variable features will be dropped)
+    myso <- RunPCA(myso, assay = myassay, features = myfeatures,
+                   reduction.name = mypca, reduction.key = mypca_key)
+    
+    myplot <- ElbowPlot(myso, reduction = mypca, ndims = 50)
+    plot(myplot + plot_annotation(title = myrun, subtitle = myregress))
+    DimHeatmap(myso, reduction = mypca, dims = 1:15, cells = 500, balanced = TRUE)
+  
+    myso <- FindNeighbors(myso, dims = 1:50, assay = myassay, reduction = mypca)
+    mygraph <- paste(myassay, "snn", sep = "_")
+    myso <- FindClusters(myso, graph.name = mygraph, resolution = 0.8)
+    
+    # Create UMAP
+    myso <- RunUMAP(myso, reduction = mypca, dims = 1:50,reduction.name = myumap)
+    myplot <- DimPlot(myso, reduction = myumap)
+    plot(myplot + plot_annotation(title = myrun, subtitle = myregress))
+  }
+  expts.ls[[myrun]] <- myso
+}
+```
+
+### Preliminary Cluster ID
+
+```{r, "prelimClusterID", echo=FALSE}
+markers <- list(early = c("SOX4"),
+                mid = c("CEBPD"),
+                late = c("CD14"))
+
+for (myrun in runs2process) {
+  myso <- expts.ls[[myrun]]
+  
+  for (mymarkers in names(markers)) {
+    myplot <- FeaturePlot(myso, features = markers[[mymarkers]], label = TRUE, label.size = 5)
+    plot(myplot + plot_annotation(title = myrun, subtitle = mymarkers))
+  }
+}
+
+# Assign labels to DMSO
+# Cluster Labels
+Labels.ls <- list(dmso = c(SCT.Diff_0 = "early_1", SCT.Diff_1 = "late_2", SCT.Diff_2 = "mid_1",
+                           SCT.Diff_3 = "lone_2", SCT.Diff_4 = "lone_3", SCT.Diff_5 = "late_1",
+                           SCT.Diff_6 = "lone_1", SCT.Diff_7 = "lone_4"),
+                  ava = c(SCT.Diff_0 = "late_2", SCT.Diff_1 = "early_1", SCT.Diff_2 = "mid_1",
+                          SCT.Diff_3 = "early_2", SCT.Diff_4 = "lone_2", SCT.Diff_5 = "late_1",
+                          SCT.Diff_6 = "lone_5", SCT.Diff_7 = "lone_1", SCT.Diff_8 = "lone_3",
+                          SCT.Diff_9 = "lone_4"),
+                  ory = c(SCT.Diff_0 = "late_1", SCT.Diff_1 = "early_1", SCT.Diff_2 = "early_2",
+                          SCT.Diff_3 = "mid_1", SCT.Diff_4 = "mid_2", SCT.Diff_5 = "late_2",
+                          SCT.Diff_6 = "lone_1", SCT.Diff_7 = "lone_3", SCT.Diff_8 = "lone_2",
+                          SCT.Diff_9 = "lone_4", SCT.Diff_10 = "lone_5"),
+                  combo = c(SCT.Diff_0 = "early_1", SCT.Diff_1 = "late_2", SCT.Diff_2 = "mid_1",
+                            SCT.Diff_3 = "late_1", SCT.Diff_4 = "early_2", SCT.Diff_5 = "lone_1",
+                            SCT.Diff_6 = "lone_2", SCT.Diff_7 = "lone_3", SCT.Diff_8 = "lone_4"))
+label_order <- c("early_1", "early_2", "mid_1", "mid_2", "late_1", "late_2",
+                 "lone_1", "lone_2", "lone_3", "lone_4", "lone_5")
+
+# Rename Clusters 
+# This could be more elegant...  I'm making lots of assumptions
+colors <- c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','#cab2d6','#6a3d9a','#ffff99','#b15928')
+names(colors) <- label_order
+
+for (myregress in regression2use) {
+  for (myrun in runs2process) {
+    myso <- expts.ls[[myrun]]
+    mynorm <- gsub("regress", "SCT", myregress)
+    
+    # Create a named column
+    myIdxname <- paste(mynorm, "clusterIdx", sep = "_")
+    myso@meta.data[[myIdxname]] <- paste(mynorm, myso@meta.data$SCT.Diff_snn_res.0.8, sep = "_")
+    
+    # Create a labeled column (make it a factor for ease of reading)
+    myIDname <- paste(mynorm, "clusterID", sep = "_")
+    myso@meta.data[[myIDname]] <- factor(Labels.ls[[myrun]][myso@meta.data[[myIdxname]]], 
+                                         levels = label_order, ordered = TRUE)
+    
+    plotcolors <- colors[unique(levels(myso@meta.data[[myIDname]]))]
+    myplot <- DimPlot(myso, reduction = myumap, group.by = myIDname, cols = plotcolors)
+    plot(myplot + plot_annotation(title = myrun, subtitle = mynorm))
+    
+    expts.ls[[myrun]] <- myso
+  }
+}
+```
+
+### Integrate the objects
+Preserve as many features as possible in the integrated object
+
+```{r, "integrate", echo=FALSE}
+# Needed to avoid error in getGlobalsandPackages 
+options(future.globals.maxSize= 3530*1024^2)
+
+# Count the number of unique features per experiment
+allFeatures <- NULL
+for (myrun in names(expts.ls)) {
+  allFeatures <- unique(c(allFeatures, rownames(expts.ls[[myrun]])))
+}
+
+expts.integrated.ls <- list()
+for (myregress in regression2use) {
+  # Select most variable features for integration
+  myassay <- gsub("regress", "SCT", myregress)
+  myfeatures <- SelectIntegrationFeatures(object.list = expts.ls, nfeatures = length(allFeatures),
+                                          fvf.nfeatures = allFeatures, assay = rep(myassay, 4))
+  
+  # Calculate Pearson Residuals
+  myiso <- PrepSCTIntegration(object.list = expts.ls, anchor.features = myfeatures,
+                              verbose = FALSE, assay = rep(myassay, 4))
+  
+  # Identify integration anchors
+  ref <- which(names(expts.ls) == baseline)
+  my.anchors <- FindIntegrationAnchors(object.list = myiso, normalization.method = "SCT",
+                                       assay = rep(myassay, 4),
+                                       reference = ref, scale = FALSE,
+                                       anchor.features = myfeatures, verbose = TRUE)
+  
+  # Integrate selected data
+  integratedName <- paste("Integrated", myassay, sep = ".")
+  myintegrated <- IntegrateData(anchorset = my.anchors, normalization.method = "SCT",
+                                verbose = FALSE, new.assay.name = integratedName)
+  
+  expts.integrated.ls[[myregress]] <- myintegrated
+}
+```
+
+### Optionally Plot Missing Features
+Lose ~2500 features (of 16990) during integration
+
+```{r, "plotmissingintegrated",echo=FALSE}
+if (TRUE) {
+  for (myregress in names(expts.integrated.ls)) {
+    myiso <- expts.integrated.ls[[myregress]]
+    lostFeat <- rownames(myiso@assays$SCT.Diff@counts)[!(rownames(myiso@assays$SCT.Diff@counts) %in% 
+                                                           rownames(myiso@assays$Integrated.SCT.Diff@data))]
+    
+    counts.per.feat <- apply(myiso@assays$SCT.Diff@counts, 1, sum)
+    cells.per.feat <- Matrix::rowSums(myiso@assays$SCT.Diff@counts > 0)
+    
+    # Plot counts and cells 
+    plot(x = log2(counts.per.feat), y = log2(cells.per.feat), pch = 20, cex = 0.5,
+         xlim = c(0, 25), ylim = c(2, 14))
+    points(x = log2(counts.per.feat[lostFeat]), y = log2(cells.per.feat[lostFeat]), pch = 20, cex = 0.5, col = "red")
+    
+    plot(x = log2(counts.per.feat[lostFeat]), y = log2(cells.per.feat[lostFeat]), pch = 20, cex = 0.5, col = "red",
+         xlim = c(0, 25), ylim = c(2, 14))
+    points(x = log2(counts.per.feat[!(names(counts.per.feat) %in% lostFeat)]),
+         y = log2(cells.per.feat)[!(names(cells.per.feat) %in% lostFeat)], pch = 20, cex = 0.5)
+    
+    for (myexpt in runs2process) {
+      
+    }
+    
   }
 }
 ```
