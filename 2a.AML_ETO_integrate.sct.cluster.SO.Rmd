@@ -301,30 +301,89 @@ for (myregress in regression2use) {
 ### Optionally Plot Missing Features
 Lose ~2500 features (of 16990) during integration
 
-```{r, "plotmissingintegrated",echo=FALSE}
+* Features must be present in all runs to be included in the integrated object
+* Inclusion in the integrated object does not mean that the feature is widely or well represented
+* Included and Missing summary counts are written to a csv `amleto_integratedFeatures_present/missing.csv`
+* Summary table - dmso.ava.ory.combo:  1 present, 0 absent. 1.0.0.0 is only present in DMSO. 0.1.1.1 is present in all but dmso.
+
+```{r, "plotmissingintegrated",echo=FALSE, results='asis'}
 if (TRUE) {
   for (myregress in names(expts.integrated.ls)) {
     myiso <- expts.integrated.ls[[myregress]]
     lostFeat <- rownames(myiso@assays$SCT.Diff@counts)[!(rownames(myiso@assays$SCT.Diff@counts) %in% 
                                                            rownames(myiso@assays$Integrated.SCT.Diff@data))]
     
-    counts.per.feat <- apply(myiso@assays$SCT.Diff@counts, 1, sum)
-    cells.per.feat <- Matrix::rowSums(myiso@assays$SCT.Diff@counts > 0)
+    # Collect information for lost and included features
+    featureSummary.ls <- list(missing = data.table(featureID = lostFeat),
+                              present = data.table(featureID = rownames(myiso)))
     
-    # Plot counts and cells 
-    plot(x = log2(counts.per.feat), y = log2(cells.per.feat), pch = 20, cex = 0.5,
-         xlim = c(0, 25), ylim = c(2, 14))
-    points(x = log2(counts.per.feat[lostFeat]), y = log2(cells.per.feat[lostFeat]), pch = 20, cex = 0.5, col = "red")
+    featureLong.ls <- list()
     
-    plot(x = log2(counts.per.feat[lostFeat]), y = log2(cells.per.feat[lostFeat]), pch = 20, cex = 0.5, col = "red",
-         xlim = c(0, 25), ylim = c(2, 14))
-    points(x = log2(counts.per.feat[!(names(counts.per.feat) %in% lostFeat)]),
-         y = log2(cells.per.feat)[!(names(cells.per.feat) %in% lostFeat)], pch = 20, cex = 0.5)
-    
-    for (myexpt in runs2process) {
+    for (myfeat in names(featureSummary.ls)) {
+      mydt <- featureSummary.ls[[myfeat]]
       
-    }
+      # Collect the data from the SCT assay
+      sct.cts.pf <- Matrix::rowSums(myiso@assays$SCT.Diff@counts)
+      sct.cells.pf <- Matrix::rowSums(myiso@assays$SCT.Diff@counts > 0)
+      
+      # Summary data for the integrated object
+      mydt[, sct.all.cts_pf := sct.cts.pf[featureID]]
+      mydt[, sct.all.cells_pf := sct.cells.pf[featureID]]
     
+      # Select missing features by cluster - any overrepresentation of a group?
+      for (myrun in runs2process) {
+        Idents(myiso) <- "SCT.Diff_clusterID"
+        DefaultAssay(myiso) <- "SCT.Diff"
+        mysubset <- subset(myiso[mydt$featureID,], subset = orig.ident == myrun)
+      
+        ss.sct.cts.pf <- Matrix::rowSums(mysubset@assays$SCT.Diff@counts)
+        ss.sct.cells.pf <- Matrix::rowSums(mysubset@assays$SCT.Diff@counts > 0)
+      
+        myctsCol <- sprintf("sct.%s.cts_pf", myrun)
+        mycellsCol <- sprintf("sct.%s.cells_pf", myrun)
+           
+        mydt[, (myctsCol) := ss.sct.cts.pf[featureID]]
+        mydt[, (mycellsCol) := ss.sct.cells.pf[featureID]]
+      }
+      
+      # Summarize which runs a gene is detected in
+      mydt[, summaryPresent := sprintf("%i.%i.%i.%i",
+                                       ifelse(sct.dmso.cells_pf > 0, 1,0),
+                                       ifelse(sct.ava.cells_pf > 0, 1,0),
+                                       ifelse(sct.ory.cells_pf > 0, 1,0),
+                                       ifelse(sct.combo.cells_pf > 0, 1,0))]
+    
+      # Boxplot
+      ctsCols <- colnames(mydt)[grepl("cts.pf", colnames(mydt))]
+      cellsCols <- colnames(mydt)[grepl("cells.pf", colnames(mydt))]
+    
+      # Melt counts/cells
+      mycts.dt <- melt(mydt[, mget(c("featureID", ctsCols))], id.vars = "featureID", variable.name = "run", value.name = "cts.pf")
+      mycts.dt[, run := gsub(".cts.pf", "", run)]
+      mycells.dt <- melt(mydt[, mget(c("featureID", cellsCols))], id.vars = "featureID", variable.name = "run", value.name = "cells.pf")
+      mycells.dt[, run := gsub(".cells.pf", "", run)]
+    
+      counts.dt <- merge(x = mycts.dt, y = mycells.dt, by = c("featureID", "run"))
+      counts.dt[,  ':=' (run = factor(run, levels = c("sct.all", "sct.dmso", "sct.ava", "sct.ory", "sct.combo")),
+                         log2.cts = log2(cts.pf),
+                         log2.cells = log2(cells.pf))]
+    
+      # Boxplot summary
+      boxplot(log2.cts ~ run, data = counts.dt, las = 1, ylab = "log2(Counts per Feature)", xlab = "",
+              main = sprintf("Summary counts per feature, %s features in integrated object", myfeat))
+      stripchart(log2.cts ~ run, data = counts.dt, method = "jitter", jitter = .25, vertical = TRUE, add = TRUE, pch = 20, cex = 0.4)
+      
+      # Summary by pattern
+      print(kable(mydt[, .N, by = summaryPresent][order(summaryPresent)],
+                  caption = sprintf("Summary distribution of features %s in integrated object", myfeat)))
+      
+      # Save the summary data
+      myfilename <- sprintf("amleto_integratedFeatures_%s.csv", myfeat)
+      fwrite(mydt, file = paste(directory$rda, myfilename, sep = "/"))
+      
+      featureLong.ls[[myfeat]] <- counts.dt
+      featureSummary.ls[[myfeat]] <- mydt
+    }
   }
 }
 ```
