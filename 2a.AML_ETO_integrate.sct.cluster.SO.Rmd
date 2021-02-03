@@ -220,8 +220,8 @@ Labels.ls <- list(dmso = c(SCT.Diff_0 = "early_1", SCT.Diff_1 = "late_2", SCT.Di
                           SCT.Diff_3 = "early_2", SCT.Diff_4 = "lone_2", SCT.Diff_5 = "late_1",
                           SCT.Diff_6 = "lone_5", SCT.Diff_7 = "lone_1", SCT.Diff_8 = "lone_3",
                           SCT.Diff_9 = "lone_4"),
-                  ory = c(SCT.Diff_0 = "late_1", SCT.Diff_1 = "early_1", SCT.Diff_2 = "early_2",
-                          SCT.Diff_3 = "mid_1", SCT.Diff_4 = "mid_2", SCT.Diff_5 = "late_2",
+                  ory = c(SCT.Diff_0 = "late_2", SCT.Diff_1 = "early_1", SCT.Diff_2 = "early_2",
+                          SCT.Diff_3 = "mid_1", SCT.Diff_4 = "mid_2", SCT.Diff_5 = "late_1",
                           SCT.Diff_6 = "lone_1", SCT.Diff_7 = "lone_3", SCT.Diff_8 = "lone_2",
                           SCT.Diff_9 = "lone_4", SCT.Diff_10 = "lone_5"),
                   combo = c(SCT.Diff_0 = "early_1", SCT.Diff_1 = "late_2", SCT.Diff_2 = "mid_1",
@@ -391,29 +391,52 @@ if (TRUE) {
 ### Plot UMAP and PCA
 
 ```{r, echo=FALSE}
-for (myfilt in names(expts.ls)) {
-  for (myrun in names(expts.ls[[myfilt]])) {
-    for (myregress in names(regressions)) {
-      myassay <- ifelse(myregress == "noregression", "SCT", gsub("regress", "SCT", myregress))
-      mypca <- gsub("SCT", "pca", myassay)
-      plot(DimPlot(expts.ls[[myfilt]][[myrun]], reduction = mypca)  + labs(title = sprintf("%s: %s", myrun, myregress)))
-    
-      myumap <- gsub("SCT", "umap", myassay)
-      plot(DimPlot(expts.ls[[myfilt]][[myrun]], reduction = myumap)  + labs(title = sprintf("%s: %s", myrun, myregress)))
-    }
-  }
+for (myregress in names(expts.integrated.ls)) {
+  myiso <- expts.integrated.ls[[myregress]]
+  
+  # Set the old cluster IDs as a factor
+  myvals <- myiso$SCT.Diff_clusterID
+  myvals <- factor(myvals, levels = label_order)
+  myiso[["sct.clusterID"]] <- myvals
+  
+  # Create a factored origIdents
+  myvals <- myiso$orig.ident
+  myvals <- factor(myvals, levels = runs2process)
+  myiso[["runID"]] <- myvals
+  
+  # Just in case... 
+  DefaultAssay(myiso) <- "Integrated.SCT.Diff"
+  
+  myiso <- RunPCA(myiso, verbose = FALSE)
+  DimPlot(myiso, reduction = "pca", group.by = "sct.clusterID")
+  DimPlot(myiso, reduction = "pca", split.by = "runID", group.by = "sct.clusterID")
+  
+  plotcolors <- colors[unique(levels(myiso$sct.clusterID))]
+  myplot <- DimPlot(myiso, reduction = "pca", group.by = "sct.clusterID", split.by = "runID", cols = plotcolors)
+  plot(myplot + plot_annotation(title = "Integrated PCA with Individual Cluster Assignments"))
+
+  myiso <- RunUMAP(myiso, reduction = "pca", dims = 1:50, verbose = FALSE)
+  plotcolors <- colors[unique(levels(myiso$sct.clusterID))]
+  myplot <- DimPlot(myiso, reduction = "umap", group.by = "sct.clusterID", split.by = "runID", cols = plotcolors)
+  plot(myplot + plot_annotation(title = "Integrated UMAP with Individual Cluster Assignments"))
+  
+  # return the object
+  expts.integrated.ls[[myregress]] <- myiso
 }
 ```
 
 ### Save the data
 
 ```{r, echo=FALSE}
-# Save the file
-for (myfilt in names(expts.ls)) {
-  file2save <- sprintf("aml_eto.regressSO.%s.%s.rds", myfilt, Sys.Date())
-  print(sprintf("%s objects:  Saving scaled/normalized/regressed data in individual objects in %s", myfilt, file2save))
-  saveRDS(expts.ls[[myfilt]], file = paste(directory$rda, file2save, sep = "/"))
-}
+# Save the list of objects
+file2save <- sprintf("aml_eto.sct.diff.%s.rds", Sys.Date())
+print(sprintf("Saving regressed data with preliminary dim reductions and cluster IDs in a list of individual objects in %s", file2save))
+saveRDS(expts.ls, file = paste(directory$rda, file2save, sep = "/"))
+
+# Save the integrated object
+file2save <- sprintf("aml_eto.integrated.sct.diff.%s.rds", Sys.Date())
+print(sprintf("Saving integrated object with preliminary dim reductions in %s", file2save))
+saveRDS(expts.integrated.ls$regress.Diff, file = paste(directory$rda, file2save, sep = "/"))
 ```
 
 ```{r, echo=FALSE}
